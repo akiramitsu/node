@@ -7,6 +7,8 @@
 #include "src/arguments.h"
 #include "src/conversions-inl.h"
 #include "src/heap/factory.h"
+#include "src/objects/hash-table-inl.h"
+#include "src/objects/js-collection-inl.h"
 
 namespace v8 {
 namespace internal {

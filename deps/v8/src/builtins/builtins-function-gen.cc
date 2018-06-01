@@ -6,6 +6,7 @@
 #include "src/builtins/builtins.h"
 #include "src/code-stub-assembler.h"
 #include "src/frame-constants.h"
+#include "src/objects/api-callbacks.h"
 #include "src/objects/descriptor-array.h"
 
 namespace v8 {
@@ -120,11 +121,10 @@ TF_BUILTIN(FastFunctionPrototypeBind, CodeStubAssembler) {
     Label empty_arguments(this);
     Label arguments_done(this, &argument_array);
     GotoIf(Uint32LessThanOrEqual(argc, Int32Constant(1)), &empty_arguments);
-    Node* elements_length =
-        ChangeUint32ToWord(Unsigned(Int32Sub(argc, Int32Constant(1))));
-    Node* elements =
-        AllocateFixedArray(PACKED_ELEMENTS, elements_length, INTPTR_PARAMETERS,
-                           kAllowLargeObjectAllocation);
+    TNode<IntPtrT> elements_length =
+        Signed(ChangeUint32ToWord(Unsigned(Int32Sub(argc, Int32Constant(1)))));
+    Node* elements = AllocateFixedArray(PACKED_ELEMENTS, elements_length,
+                                        kAllowLargeObjectAllocation);
     VARIABLE(index, MachineType::PointerRepresentation());
     index.Bind(IntPtrConstant(0));
     VariableList foreach_vars({&index}, zone());

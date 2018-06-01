@@ -30,6 +30,7 @@
 #include "src/log.h"
 #include "src/messages.h"
 #include "src/objects/debug-objects-inl.h"
+#include "src/objects/js-promise-inl.h"
 #include "src/snapshot/natives.h"
 #include "src/snapshot/snapshot.h"
 #include "src/wasm/wasm-objects-inl.h"
@@ -59,8 +60,16 @@ class Debug::TemporaryObjectsTracker : public HeapObjectAllocationTracker {
     objects_.insert(to);
   }
 
-  bool HasObject(Address addr) const {
-    return objects_.find(addr) != objects_.end();
+  bool HasObject(Handle<HeapObject> obj) const {
+    if (obj->IsJSObject() &&
+        Handle<JSObject>::cast(obj)->GetEmbedderFieldCount()) {
+      // Embedder may store any pointers using embedder fields and implements
+      // non trivial logic, e.g. create wrappers lazily and store pointer to
+      // native object inside embedder field. We should consider all objects
+      // with embedder fields as non temporary.
+      return false;
+    }
+    return objects_.find(obj->address()) != objects_.end();
   }
 
  private:
@@ -339,9 +348,10 @@ void Debug::ThreadInit() {
   thread_local_.async_task_count_ = 0;
   thread_local_.last_breakpoint_id_ = 0;
   clear_suspended_generator();
-  thread_local_.restart_fp_ = nullptr;
+  thread_local_.restart_fp_ = kNullAddress;
   base::Relaxed_Store(&thread_local_.current_debug_scope_,
                       static_cast<base::AtomicWord>(0));
+  thread_local_.break_on_next_function_call_ = false;
   UpdateHookOnFunctionCall();
 }
 
@@ -465,11 +475,13 @@ void Debug::Break(JavaScriptFrame* frame, Handle<JSFunction> break_target) {
   // Find actual break points, if any, and trigger debug break event.
   MaybeHandle<FixedArray> break_points_hit =
       CheckBreakPoints(debug_info, &location);
-  if (!break_points_hit.is_null()) {
+  if (!break_points_hit.is_null() || break_on_next_function_call()) {
     // Clear all current stepping setup.
     ClearStepping();
     // Notify the debug event listeners.
-    OnDebugBreak(break_points_hit.ToHandleChecked());
+    OnDebugBreak(!break_points_hit.is_null()
+                     ? break_points_hit.ToHandleChecked()
+                     : isolate_->factory()->empty_fixed_array());
     return;
   }
 
@@ -636,7 +648,7 @@ bool Debug::CheckBreakPoint(Handle<BreakPoint> break_point,
     }
     return false;
   }
-  return result->BooleanValue();
+  return result->BooleanValue(isolate_);
 }
 
 bool Debug::SetBreakPoint(Handle<JSFunction> function,
@@ -673,10 +685,10 @@ bool Debug::SetBreakPointForScript(Handle<Script> script,
   Handle<BreakPoint> break_point =
       isolate_->factory()->NewBreakPoint(*id, condition);
   if (script->type() == Script::TYPE_WASM) {
-    Handle<WasmCompiledModule> compiled_module(
-        WasmCompiledModule::cast(script->wasm_compiled_module()), isolate_);
-    return WasmCompiledModule::SetBreakPoint(compiled_module, source_position,
-                                             break_point);
+    Handle<WasmModuleObject> module_object(
+        WasmModuleObject::cast(script->wasm_module_object()), isolate_);
+    return WasmModuleObject::SetBreakPoint(module_object, source_position,
+                                           break_point);
   }
 
   HandleScope scope(isolate_);
@@ -889,8 +901,24 @@ MaybeHandle<FixedArray> Debug::GetHitBreakPoints(Handle<DebugInfo> debug_info,
   return break_points_hit;
 }
 
+void Debug::SetBreakOnNextFunctionCall() {
+  // This method forces V8 to break on next function call regardless current
+  // last_step_action_. If any break happens between SetBreakOnNextFunctionCall
+  // and ClearBreakOnNextFunctionCall, we will clear this flag and stepping. If
+  // break does not happen, e.g. all called functions are blackboxed or no
+  // function is called, then we will clear this flag and let stepping continue
+  // its normal business.
+  thread_local_.break_on_next_function_call_ = true;
+  UpdateHookOnFunctionCall();
+}
+
+void Debug::ClearBreakOnNextFunctionCall() {
+  thread_local_.break_on_next_function_call_ = false;
+  UpdateHookOnFunctionCall();
+}
+
 void Debug::PrepareStepIn(Handle<JSFunction> function) {
-  CHECK(last_step_action() >= StepIn);
+  CHECK(last_step_action() >= StepIn || break_on_next_function_call());
   if (ignore_events()) return;
   if (in_debug_scope()) return;
   if (break_disabled()) return;
@@ -1150,6 +1178,7 @@ void Debug::ClearStepping() {
   thread_local_.fast_forward_to_return_ = false;
   thread_local_.last_frame_count_ = -1;
   thread_local_.target_frame_count_ = -1;
+  thread_local_.break_on_next_function_call_ = false;
   UpdateHookOnFunctionCall();
 }
 
@@ -1672,8 +1701,7 @@ Handle<FixedArray> Debug::GetLoadedScripts() {
       if (script->HasValidSource()) results->set(length++, script);
     }
   }
-  results->Shrink(length);
-  return results;
+  return FixedArray::ShrinkOrEmpty(results, length);
 }
 
 
@@ -1706,7 +1734,7 @@ MaybeHandle<Object> Debug::MakeCompileEvent(Handle<Script> script,
 }
 
 MaybeHandle<Object> Debug::MakeAsyncTaskEvent(
-    v8::debug::PromiseDebugActionType type, int id) {
+    v8::debug::DebugAsyncActionType type, int id) {
   // Create the async task event object.
   Handle<Object> argv[] = {Handle<Smi>(Smi::FromInt(type), isolate_),
                            Handle<Smi>(Smi::FromInt(id), isolate_)};
@@ -1741,6 +1769,15 @@ void Debug::OnPromiseReject(Handle<Object> promise, Handle<Object> value) {
           ->IsUndefined(isolate_)) {
     OnException(value, promise);
   }
+}
+
+void Debug::OnAsyncFunctionStateChanged(Handle<JSPromise> promise,
+                                        debug::DebugAsyncActionType event) {
+  if (in_debug_scope() || ignore_events()) return;
+  if (!debug_delegate_) return;
+  PostponeInterruptsScope no_interrupts(isolate_);
+  int id = NextAsyncTaskId(promise);
+  debug_delegate_->AsyncEventOccurred(event, id, false);
 }
 
 namespace {
@@ -1881,39 +1918,6 @@ void Debug::OnAfterCompile(Handle<Script> script) {
   ProcessCompileEvent(v8::AfterCompile, script);
 }
 
-namespace {
-// In an async function, reuse the existing stack related to the outer
-// Promise. Otherwise, e.g. in a direct call to then, save a new stack.
-// Promises with multiple reactions with one or more of them being async
-// functions will not get a good stack trace, as async functions require
-// different stacks from direct Promise use, but we save and restore a
-// stack once for all reactions.
-//
-// If this isn't a case of async function, we return false, otherwise
-// we set the correct id and return true.
-//
-// TODO(littledan): Improve this case.
-int GetReferenceAsyncTaskId(Isolate* isolate, Handle<JSPromise> promise) {
-  Handle<Symbol> handled_by_symbol =
-      isolate->factory()->promise_handled_by_symbol();
-  Handle<Object> handled_by_promise =
-      JSObject::GetDataProperty(promise, handled_by_symbol);
-  if (!handled_by_promise->IsJSPromise()) {
-    return isolate->debug()->NextAsyncTaskId(promise);
-  }
-  Handle<JSPromise> handled_by_promise_js =
-      Handle<JSPromise>::cast(handled_by_promise);
-  Handle<Symbol> async_stack_id_symbol =
-      isolate->factory()->promise_async_stack_id_symbol();
-  Handle<Object> async_task_id =
-      JSObject::GetDataProperty(handled_by_promise_js, async_stack_id_symbol);
-  if (!async_task_id->IsSmi()) {
-    return isolate->debug()->NextAsyncTaskId(promise);
-  }
-  return Handle<Smi>::cast(async_task_id)->value();
-}
-}  //  namespace
-
 void Debug::RunPromiseHook(PromiseHookType hook_type, Handle<JSPromise> promise,
                            Handle<Object> parent) {
   if (hook_type == PromiseHookType::kResolve) return;
@@ -1921,14 +1925,17 @@ void Debug::RunPromiseHook(PromiseHookType hook_type, Handle<JSPromise> promise,
   if (!debug_delegate_) return;
   PostponeInterruptsScope no_interrupts(isolate_);
 
-  int id = GetReferenceAsyncTaskId(isolate_, promise);
   if (hook_type == PromiseHookType::kBefore) {
-    debug_delegate_->PromiseEventOccurred(debug::kDebugWillHandle, id, false);
+    if (!promise->async_task_id()) return;
+    debug_delegate_->AsyncEventOccurred(debug::kDebugWillHandle,
+                                        promise->async_task_id(), false);
   } else if (hook_type == PromiseHookType::kAfter) {
-    debug_delegate_->PromiseEventOccurred(debug::kDebugDidHandle, id, false);
+    if (!promise->async_task_id()) return;
+    debug_delegate_->AsyncEventOccurred(debug::kDebugDidHandle,
+                                        promise->async_task_id(), false);
   } else {
     DCHECK(hook_type == PromiseHookType::kInit);
-    debug::PromiseDebugActionType type = debug::kDebugPromiseThen;
+    debug::DebugAsyncActionType type = debug::kDebugPromiseThen;
     bool last_frame_was_promise_builtin = false;
     JavaScriptFrameIterator it(isolate_);
     while (!it.done()) {
@@ -1939,18 +1946,15 @@ void Debug::RunPromiseHook(PromiseHookType hook_type, Handle<JSPromise> promise,
         if (info->IsUserJavaScript()) {
           // We should not report PromiseThen and PromiseCatch which is called
           // indirectly, e.g. Promise.all calls Promise.then internally.
-          if (type == debug::kDebugAsyncFunctionPromiseCreated ||
-              last_frame_was_promise_builtin) {
-            debug_delegate_->PromiseEventOccurred(type, id, IsBlackboxed(info));
+          if (last_frame_was_promise_builtin) {
+            int id = NextAsyncTaskId(promise);
+            debug_delegate_->AsyncEventOccurred(type, id, IsBlackboxed(info));
           }
           return;
         }
         last_frame_was_promise_builtin = false;
         if (info->HasBuiltinId()) {
-          if (info->builtin_id() == Builtins::kAsyncFunctionPromiseCreate) {
-            type = debug::kDebugAsyncFunctionPromiseCreated;
-            last_frame_was_promise_builtin = true;
-          } else if (info->builtin_id() == Builtins::kPromisePrototypeThen) {
+          if (info->builtin_id() == Builtins::kPromisePrototypeThen) {
             type = debug::kDebugPromiseThen;
             last_frame_was_promise_builtin = true;
           } else if (info->builtin_id() == Builtins::kPromisePrototypeCatch) {
@@ -1967,19 +1971,11 @@ void Debug::RunPromiseHook(PromiseHookType hook_type, Handle<JSPromise> promise,
   }
 }
 
-int Debug::NextAsyncTaskId(Handle<JSObject> promise) {
-  LookupIterator it(promise, isolate_->factory()->promise_async_id_symbol());
-  Maybe<bool> maybe = JSReceiver::HasProperty(&it);
-  if (maybe.ToChecked()) {
-    MaybeHandle<Object> result = Object::GetProperty(&it);
-    return Handle<Smi>::cast(result.ToHandleChecked())->value();
+int Debug::NextAsyncTaskId(Handle<JSPromise> promise) {
+  if (!promise->async_task_id()) {
+    promise->set_async_task_id(++thread_local_.async_task_count_);
   }
-  Handle<Smi> async_id =
-      handle(Smi::FromInt(++thread_local_.async_task_count_), isolate_);
-  Object::SetProperty(&it, async_id, LanguageMode::kSloppy,
-                      Object::MAY_BE_STORE_FROM_KEYED)
-      .ToChecked();
-  return async_id->value();
+  return promise->async_task_id();
 }
 
 namespace {
@@ -2149,7 +2145,8 @@ void Debug::UpdateHookOnFunctionCall() {
   STATIC_ASSERT(LastStepAction == StepIn);
   hook_on_function_call_ =
       thread_local_.last_step_action_ == StepIn ||
-      isolate_->debug_execution_mode() == DebugInfo::kSideEffects;
+      isolate_->debug_execution_mode() == DebugInfo::kSideEffects ||
+      thread_local_.break_on_next_function_call_;
 }
 
 MaybeHandle<Object> Debug::Call(Handle<Object> fun, Handle<Object> data) {
@@ -2196,19 +2193,7 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode) {
       bool ignore_break = ignore_break_mode == kIgnoreIfTopFrameBlackboxed
                               ? IsBlackboxed(shared)
                               : AllFramesOnStackAreBlackboxed();
-      if (ignore_break) {
-        // Inspector uses pause on next statement for asynchronous breakpoints.
-        // When breakpoint is fired we try to break on first not blackboxed
-        // statement. To achieve this goal we need to deoptimize current
-        // function and don't clear requested DebugBreak even if it's blackboxed
-        // to be able to break on not blackboxed function call.
-        // TODO(yangguo): introduce break_on_function_entry since current
-        // implementation is slow.
-        if (isolate_->stack_guard()->CheckDebugBreak()) {
-          Deoptimizer::DeoptimizeFunction(*function);
-        }
-        return;
-      }
+      if (ignore_break) return;
       JSGlobalObject* global = function->context()->global_object();
       // Don't stop in debugger functions.
       if (IsDebugGlobal(global)) return;
@@ -2216,8 +2201,6 @@ void Debug::HandleDebugBreak(IgnoreBreakMode ignore_break_mode) {
       if (IsMutedAtCurrentLocation(it.frame())) return;
     }
   }
-
-  isolate_->stack_guard()->ClearDebugBreak();
 
   // Clear stepping to avoid duplicate breaks.
   ClearStepping();
@@ -2327,6 +2310,10 @@ void Debug::StartSideEffectCheckMode() {
   DCHECK(!temporary_objects_);
   temporary_objects_.reset(new TemporaryObjectsTracker());
   isolate_->heap()->AddHeapObjectAllocationTracker(temporary_objects_.get());
+  Handle<FixedArray> array(
+      isolate_->native_context()->regexp_last_match_info());
+  regexp_match_info_ =
+      Handle<RegExpMatchInfo>::cast(isolate_->factory()->CopyFixedArray(array));
 }
 
 void Debug::StopSideEffectCheckMode() {
@@ -2347,6 +2334,8 @@ void Debug::StopSideEffectCheckMode() {
   DCHECK(temporary_objects_);
   isolate_->heap()->RemoveHeapObjectAllocationTracker(temporary_objects_.get());
   temporary_objects_.reset();
+  isolate_->native_context()->set_regexp_last_match_info(*regexp_match_info_);
+  regexp_match_info_ = Handle<RegExpMatchInfo>::null();
 }
 
 void Debug::ApplySideEffectChecks(Handle<DebugInfo> debug_info) {
@@ -2367,40 +2356,58 @@ void Debug::ClearSideEffectChecks(Handle<DebugInfo> debug_info) {
   }
 }
 
-bool Debug::PerformSideEffectCheck(Handle<JSFunction> function) {
+bool Debug::PerformSideEffectCheck(Handle<JSFunction> function,
+                                   Handle<Object> receiver) {
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
   DisallowJavascriptExecution no_js(isolate_);
   if (!function->is_compiled() &&
       !Compiler::Compile(function, Compiler::KEEP_EXCEPTION)) {
     return false;
   }
-  if (!SharedFunctionInfo::HasNoSideEffect(handle(function->shared()))) {
-    if (FLAG_trace_side_effect_free_debug_evaluate) {
-      PrintF("[debug-evaluate] Function %s failed side effect check.\n",
-             function->shared()->DebugName()->ToCString().get());
+  SharedFunctionInfo::SideEffectState side_effect_state =
+      SharedFunctionInfo::GetSideEffectState(handle(function->shared()));
+  switch (side_effect_state) {
+    case SharedFunctionInfo::kHasSideEffects:
+      if (FLAG_trace_side_effect_free_debug_evaluate) {
+        PrintF("[debug-evaluate] Function %s failed side effect check.\n",
+               function->shared()->DebugName()->ToCString().get());
+      }
+      side_effect_check_failed_ = true;
+      // Throw an uncatchable termination exception.
+      isolate_->TerminateExecution();
+      return false;
+    case SharedFunctionInfo::kRequiresRuntimeChecks: {
+      Handle<SharedFunctionInfo> shared(function->shared());
+      if (!shared->HasBytecodeArray()) {
+        return PerformSideEffectCheckForObject(receiver);
+      }
+      // If function has bytecode array then prepare function for debug
+      // execution to perform runtime side effect checks.
+      DCHECK(shared->is_compiled());
+      if (shared->GetCode() ==
+          isolate_->builtins()->builtin(Builtins::kDeserializeLazy)) {
+        Snapshot::EnsureBuiltinIsDeserialized(isolate_, shared);
+      }
+      GetOrCreateDebugInfo(shared);
+      PrepareFunctionForDebugExecution(shared);
+      return true;
     }
-    side_effect_check_failed_ = true;
-    // Throw an uncatchable termination exception.
-    isolate_->TerminateExecution();
-    return false;
+    case SharedFunctionInfo::kHasNoSideEffect:
+      return true;
+    case SharedFunctionInfo::kNotComputed:
+      UNREACHABLE();
+      return false;
   }
-  // If function has bytecode array then prepare function for debug execution
-  // to perform runtime side effect checks.
-  if (function->shared()->requires_runtime_side_effect_checks()) {
-    Handle<SharedFunctionInfo> shared(function->shared());
-    DCHECK(shared->is_compiled());
-    if (shared->GetCode() ==
-        isolate_->builtins()->builtin(Builtins::kDeserializeLazy)) {
-      Snapshot::EnsureBuiltinIsDeserialized(isolate_, shared);
-    }
-    GetOrCreateDebugInfo(shared);
-    PrepareFunctionForDebugExecution(shared);
-  }
-  return true;
+  UNREACHABLE();
+  return false;
 }
 
 bool Debug::PerformSideEffectCheckForCallback(Handle<Object> callback_info) {
   DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
+  if (!callback_info.is_null() && callback_info->IsCallHandlerInfo() &&
+      i::CallHandlerInfo::cast(*callback_info)->NextCallHasNoSideEffect()) {
+    return true;
+  }
   // TODO(7515): always pass a valid callback info object.
   if (!callback_info.is_null() &&
       DebugEvaluate::CallbackHasNoSideEffect(*callback_info)) {
@@ -2435,15 +2442,19 @@ bool Debug::PerformSideEffectCheckAtBytecode(InterpretedFrame* frame) {
   }
   Handle<Object> object =
       handle(frame->ReadInterpreterRegister(reg.index()), isolate_);
+  return PerformSideEffectCheckForObject(object);
+}
+
+bool Debug::PerformSideEffectCheckForObject(Handle<Object> object) {
+  DCHECK_EQ(isolate_->debug_execution_mode(), DebugInfo::kSideEffects);
+
   if (object->IsHeapObject()) {
-    Address address = Handle<HeapObject>::cast(object)->address();
-    if (temporary_objects_->HasObject(address)) {
+    if (temporary_objects_->HasObject(Handle<HeapObject>::cast(object))) {
       return true;
     }
   }
   if (FLAG_trace_side_effect_free_debug_evaluate) {
-    PrintF("[debug-evaluate] %s failed runtime side effect check.\n",
-           interpreter::Bytecodes::ToString(bytecode));
+    PrintF("[debug-evaluate] failed runtime side effect check.\n");
   }
   side_effect_check_failed_ = true;
   // Throw an uncatchable termination exception.
@@ -2451,8 +2462,8 @@ bool Debug::PerformSideEffectCheckAtBytecode(InterpretedFrame* frame) {
   return false;
 }
 
-void LegacyDebugDelegate::PromiseEventOccurred(
-    v8::debug::PromiseDebugActionType type, int id, bool is_blackboxed) {
+void LegacyDebugDelegate::AsyncEventOccurred(
+    v8::debug::DebugAsyncActionType type, int id, bool is_blackboxed) {
   DebugScope debug_scope(isolate_->debug());
   if (debug_scope.failed()) return;
   HandleScope scope(isolate_);

@@ -147,9 +147,10 @@ RUNTIME_FUNCTION(Runtime_SetCode) {
   // the target_shared optimized code map.
   JSFunction::EnsureFeedbackVector(target);
 
-  if (isolate->logger()->is_logging_code_events() || isolate->is_profiling()) {
+  if (isolate->logger()->is_listening_to_code_events() ||
+      isolate->is_profiling()) {
     isolate->logger()->LogExistingFunction(
-        source_shared, Handle<AbstractCode>(source_shared->abstract_code()));
+        source_shared, handle(source_shared->abstract_code(), isolate));
   }
 
   return *target;

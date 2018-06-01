@@ -225,6 +225,9 @@ class Debug {
   void OnCompileError(Handle<Script> script);
   void OnAfterCompile(Handle<Script> script);
 
+  void OnAsyncFunctionStateChanged(Handle<JSPromise> promise,
+                                   debug::DebugAsyncActionType);
+
   V8_WARN_UNUSED_RESULT MaybeHandle<Object> Call(Handle<Object> fun,
                                                  Handle<Object> data);
   Handle<Context> GetDebugContext();
@@ -266,6 +269,9 @@ class Debug {
   void ClearStepping();
   void ClearStepOut();
 
+  void SetBreakOnNextFunctionCall();
+  void ClearBreakOnNextFunctionCall();
+
   void DeoptimizeFunction(Handle<SharedFunctionInfo> shared);
   void PrepareFunctionForDebugExecution(Handle<SharedFunctionInfo> shared);
   void InstallDebugBreakTrampoline();
@@ -276,7 +282,7 @@ class Debug {
   void RunPromiseHook(PromiseHookType hook_type, Handle<JSPromise> promise,
                       Handle<Object> parent);
 
-  int NextAsyncTaskId(Handle<JSObject> promise);
+  int NextAsyncTaskId(Handle<JSPromise> promise);
 
   bool IsBlackboxed(Handle<SharedFunctionInfo> shared);
 
@@ -345,9 +351,11 @@ class Debug {
   void ApplySideEffectChecks(Handle<DebugInfo> debug_info);
   void ClearSideEffectChecks(Handle<DebugInfo> debug_info);
 
-  bool PerformSideEffectCheck(Handle<JSFunction> function);
+  bool PerformSideEffectCheck(Handle<JSFunction> function,
+                              Handle<Object> receiver);
   bool PerformSideEffectCheckForCallback(Handle<Object> callback_info);
   bool PerformSideEffectCheckAtBytecode(InterpretedFrame* frame);
+  bool PerformSideEffectCheckForObject(Handle<Object> object);
 
   // Flags and states.
   DebugScope* debugger_entry() {
@@ -404,6 +412,9 @@ class Debug {
   }
 
   StepAction last_step_action() { return thread_local_.last_step_action_; }
+  bool break_on_next_function_call() const {
+    return thread_local_.break_on_next_function_call_;
+  }
 
   DebugFeatureTracker* feature_tracker() { return &feature_tracker_; }
 
@@ -451,7 +462,7 @@ class Debug {
   V8_WARN_UNUSED_RESULT MaybeHandle<Object> MakeCompileEvent(
       Handle<Script> script, v8::DebugEvent type);
   V8_WARN_UNUSED_RESULT MaybeHandle<Object> MakeAsyncTaskEvent(
-      v8::debug::PromiseDebugActionType type, int id);
+      v8::debug::DebugAsyncActionType type, int id);
 
   void ProcessCompileEvent(v8::DebugEvent event, Handle<Script> script);
   void ProcessDebugEvent(v8::DebugEvent event, Handle<JSObject> event_data);
@@ -535,6 +546,8 @@ class Debug {
   class TemporaryObjectsTracker;
   std::unique_ptr<TemporaryObjectsTracker> temporary_objects_;
 
+  Handle<RegExpMatchInfo> regexp_match_info_;
+
   // Used to collect histogram data on debugger feature usage.
   DebugFeatureTracker feature_tracker_;
 
@@ -585,6 +598,10 @@ class Debug {
 
     // Last used inspector breakpoint id.
     int last_breakpoint_id_;
+
+    // This flag is true when SetBreakOnNextFunctionCall is called and it forces
+    // debugger to break on next function call.
+    bool break_on_next_function_call_;
   };
 
   // Storage location for registers when handling debug break calls
@@ -609,8 +626,8 @@ class Debug {
 class LegacyDebugDelegate : public v8::debug::DebugDelegate {
  public:
   explicit LegacyDebugDelegate(Isolate* isolate) : isolate_(isolate) {}
-  void PromiseEventOccurred(v8::debug::PromiseDebugActionType type, int id,
-                            bool is_blackboxed) override;
+  void AsyncEventOccurred(v8::debug::DebugAsyncActionType type, int id,
+                          bool is_blackboxed) override;
   void ScriptCompiled(v8::Local<v8::debug::Script> script, bool is_live_edited,
                       bool has_compile_error) override;
   void BreakProgramRequested(v8::Local<v8::Context> paused_context,

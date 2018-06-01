@@ -700,10 +700,13 @@ static void DebugEventBreak(
     CcTest::CollectGarbage(v8::internal::NEW_SPACE);
 
     // Set the break flag again to come back here as soon as possible.
-    v8::debug::DebugBreak(CcTest::isolate());
+    v8::debug::SetBreakOnNextFunctionCall(CcTest::isolate());
   }
 }
 
+static void BreakRightNow(v8::Isolate* isolate, void*) {
+  v8::debug::BreakRightNow(isolate);
+}
 
 // Debug event handler which re-issues a debug break until a limit has been
 // reached.
@@ -724,7 +727,7 @@ static void DebugEventBreakMax(
       break_point_hit_count++;
 
       // Set the break flag again to come back here as soon as possible.
-      v8::debug::DebugBreak(v8_isolate);
+      v8_isolate->RequestInterrupt(BreakRightNow, nullptr);
 
     } else if (terminate_after_max_break_point_hit) {
       // Terminate execution after the last break if requested.
@@ -3905,7 +3908,7 @@ TEST(DebugBreak) {
   f3->Call(context, env->Global(), 0, nullptr).ToLocalChecked();
 
   // Set the debug break flag.
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
 
   // Call all functions with different argument count.
   break_point_hit_count = 0;
@@ -4004,7 +4007,7 @@ TEST(DebugBreakWithoutJS) {
   SetDebugEventListener(isolate, DebugEventBreak);
 
   // Set the debug break flag.
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
 
   v8::Local<v8::String> json = v8_str("[1]");
   v8::Local<v8::Value> parsed = v8::JSON::Parse(context, json).ToLocalChecked();
@@ -4036,11 +4039,11 @@ TEST(DisableBreak) {
   v8::Local<v8::Function> f = CompileFunction(&env, src, "f");
 
   // Set, test and cancel debug break.
-  v8::debug::DebugBreak(env->GetIsolate());
-  v8::debug::CancelDebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
+  v8::debug::ClearBreakOnNextFunctionCall(env->GetIsolate());
 
   // Set the debug break flag.
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
 
   // Call all functions with different argument count.
   break_point_hit_count = 0;
@@ -4048,7 +4051,7 @@ TEST(DisableBreak) {
   CHECK_EQ(1, break_point_hit_count);
 
   {
-    v8::debug::DebugBreak(env->GetIsolate());
+    v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
     i::Isolate* isolate = reinterpret_cast<i::Isolate*>(env->GetIsolate());
     v8::internal::DisableBreak disable_break(isolate->debug());
     f->Call(context, env->Global(), 0, nullptr).ToLocalChecked();
@@ -4094,7 +4097,7 @@ TEST(NoBreakWhenBootstrapping) {
   SetDebugEventListener(isolate, DebugEventCounter);
 
   // Set the debug break flag.
-  v8::debug::DebugBreak(isolate);
+  v8::debug::SetBreakOnNextFunctionCall(isolate);
   break_point_hit_count = 0;
   {
     // Create a context with an extension to make sure that some JavaScript
@@ -4643,214 +4646,6 @@ TEST(SetDebugEventListenerOnUninitializedVM) {
   EnableDebugger(CcTest::isolate());
 }
 
-// Source for a JavaScript function which returns the data parameter of a
-// function called in the context of the debugger. If no data parameter is
-// passed it throws an exception.
-static const char* debugger_call_with_data_source =
-    "function debugger_call_with_data(exec_state, data) {"
-    "  if (data) return data;"
-    "  throw 'No data!'"
-    "}";
-v8::Local<v8::Function> debugger_call_with_data;
-
-
-// Source for a JavaScript function which returns the data parameter of a
-// function called in the context of the debugger. If no data parameter is
-// passed it throws an exception.
-static const char* debugger_call_with_closure_source =
-    "var x = 3;"
-    "(function (exec_state) {"
-    "  if (exec_state.y) return x - 1;"
-    "  exec_state.y = x;"
-    "  return exec_state.y"
-    "})";
-v8::Local<v8::Function> debugger_call_with_closure;
-
-// Function to retrieve the number of JavaScript frames by calling a JavaScript
-// in the debugger.
-static void CheckFrameCount(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::Local<v8::Context> context = args.GetIsolate()->GetCurrentContext();
-  CHECK(v8::debug::Call(context, frame_count).ToLocalChecked()->IsNumber());
-  CHECK_EQ(args[0]->Int32Value(context).FromJust(),
-           v8::debug::Call(context, frame_count)
-               .ToLocalChecked()
-               ->Int32Value(context)
-               .FromJust());
-}
-
-
-// Function to retrieve the source line of the top JavaScript frame by calling a
-// JavaScript function in the debugger.
-static void CheckSourceLine(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::Local<v8::Context> context = args.GetIsolate()->GetCurrentContext();
-  CHECK(
-      v8::debug::Call(context, frame_source_line).ToLocalChecked()->IsNumber());
-  CHECK_EQ(args[0]->Int32Value(context).FromJust(),
-           v8::debug::Call(context, frame_source_line)
-               .ToLocalChecked()
-               ->Int32Value(context)
-               .FromJust());
-}
-
-
-// Function to test passing an additional parameter to a JavaScript function
-// called in the debugger. It also tests that functions called in the debugger
-// can throw exceptions.
-static void CheckDataParameter(
-    const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::Local<v8::String> data = v8_str(args.GetIsolate(), "Test");
-  v8::Local<v8::Context> context = args.GetIsolate()->GetCurrentContext();
-  CHECK(v8::debug::Call(context, debugger_call_with_data, data)
-            .ToLocalChecked()
-            ->IsString());
-
-  for (int i = 0; i < 3; i++) {
-    v8::TryCatch catcher(args.GetIsolate());
-    CHECK(v8::debug::Call(context, debugger_call_with_data).IsEmpty());
-    CHECK(catcher.HasCaught());
-    CHECK(catcher.Exception()->IsString());
-  }
-}
-
-
-// Function to test using a JavaScript with closure in the debugger.
-static void CheckClosure(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::Local<v8::Context> context = args.GetIsolate()->GetCurrentContext();
-  CHECK(v8::debug::Call(context, debugger_call_with_closure)
-            .ToLocalChecked()
-            ->IsNumber());
-  CHECK_EQ(3, v8::debug::Call(context, debugger_call_with_closure)
-                  .ToLocalChecked()
-                  ->Int32Value(context)
-                  .FromJust());
-}
-
-
-// Test functions called through the debugger.
-TEST(CallFunctionInDebugger) {
-  // Create and enter a context with the functions CheckFrameCount,
-  // CheckSourceLine and CheckDataParameter installed.
-  v8::Isolate* isolate = CcTest::isolate();
-  v8::HandleScope scope(isolate);
-  v8::Local<v8::ObjectTemplate> global_template =
-      v8::ObjectTemplate::New(isolate);
-  global_template->Set(v8_str(isolate, "CheckFrameCount"),
-                       v8::FunctionTemplate::New(isolate, CheckFrameCount));
-  global_template->Set(v8_str(isolate, "CheckSourceLine"),
-                       v8::FunctionTemplate::New(isolate, CheckSourceLine));
-  global_template->Set(v8_str(isolate, "CheckDataParameter"),
-                       v8::FunctionTemplate::New(isolate, CheckDataParameter));
-  global_template->Set(v8_str(isolate, "CheckClosure"),
-                       v8::FunctionTemplate::New(isolate, CheckClosure));
-  v8::Local<v8::Context> context =
-      v8::Context::New(isolate, nullptr, global_template);
-  v8::Context::Scope context_scope(context);
-
-  // Compile a function for checking the number of JavaScript frames.
-  v8::Script::Compile(context, v8_str(isolate, frame_count_source))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-  frame_count = v8::Local<v8::Function>::Cast(
-      context->Global()
-          ->Get(context, v8_str(isolate, "frame_count"))
-          .ToLocalChecked());
-
-  // Compile a function for returning the source line for the top frame.
-  v8::Script::Compile(context, v8_str(isolate, frame_source_line_source))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-  frame_source_line = v8::Local<v8::Function>::Cast(
-      context->Global()
-          ->Get(context, v8_str(isolate, "frame_source_line"))
-          .ToLocalChecked());
-
-  // Compile a function returning the data parameter.
-  v8::Script::Compile(context, v8_str(isolate, debugger_call_with_data_source))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-  debugger_call_with_data = v8::Local<v8::Function>::Cast(
-      context->Global()
-          ->Get(context, v8_str(isolate, "debugger_call_with_data"))
-          .ToLocalChecked());
-
-  // Compile a function capturing closure.
-  debugger_call_with_closure = v8::Local<v8::Function>::Cast(
-      v8::Script::Compile(context,
-                          v8_str(isolate, debugger_call_with_closure_source))
-          .ToLocalChecked()
-          ->Run(context)
-          .ToLocalChecked());
-
-  // Calling a function through the debugger returns 0 frames if there are
-  // no JavaScript frames.
-  CHECK(v8::Integer::New(isolate, 0)
-            ->Equals(context,
-                     v8::debug::Call(context, frame_count).ToLocalChecked())
-            .FromJust());
-
-  // Test that the number of frames can be retrieved.
-  v8::Script::Compile(context, v8_str(isolate, "CheckFrameCount(1)"))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-  v8::Script::Compile(context, v8_str(isolate,
-                                      "function f() {"
-                                      "  CheckFrameCount(2);"
-                                      "}; f()"))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-
-  // Test that the source line can be retrieved.
-  v8::Script::Compile(context, v8_str(isolate, "CheckSourceLine(0)"))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-  v8::Script::Compile(context, v8_str(isolate,
-                                      "function f() {\n"
-                                      "  CheckSourceLine(1)\n"
-                                      "  CheckSourceLine(2)\n"
-                                      "  CheckSourceLine(3)\n"
-                                      "}; f()"))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-
-  // Test that a parameter can be passed to a function called in the debugger.
-  v8::Script::Compile(context, v8_str(isolate, "CheckDataParameter()"))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-
-  // Test that a function with closure can be run in the debugger.
-  v8::Script::Compile(context, v8_str(isolate, "CheckClosure()"))
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-
-  // Test that the source line is correct when there is a line offset.
-  v8::ScriptOrigin origin(v8_str(isolate, "test"),
-                          v8::Integer::New(isolate, 7));
-  v8::Script::Compile(context, v8_str(isolate, "CheckSourceLine(7)"), &origin)
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-  v8::Script::Compile(context, v8_str(isolate,
-                                      "function f() {\n"
-                                      "  CheckSourceLine(8)\n"
-                                      "  CheckSourceLine(9)\n"
-                                      "  CheckSourceLine(10)\n"
-                                      "}; f()"),
-                      &origin)
-      .ToLocalChecked()
-      ->Run(context)
-      .ToLocalChecked();
-}
-
-
 // Test that clearing the debug event listener actually clears all break points
 // and related information.
 TEST(DebuggerUnload) {
@@ -5148,7 +4943,7 @@ static void DebugBreakEventListener(const v8::Debug::EventDetails& details) {
   if (details.GetEvent() == v8::Break) {
     event_listener_break_hit_count++;
     if (event_listener_break_hit_count == 1) {
-      v8::debug::DebugBreak(details.GetIsolate());
+      details.GetIsolate()->RequestInterrupt(BreakRightNow, nullptr);
     }
   }
 }
@@ -5216,7 +5011,7 @@ static void DebugEventDebugBreak(
 
     // Keep forcing breaks.
     if (break_point_hit_count < 20) {
-      v8::debug::DebugBreak(CcTest::isolate());
+      v8::debug::SetBreakOnNextFunctionCall(CcTest::isolate());
     }
   }
 }
@@ -5247,7 +5042,7 @@ TEST(RegExpDebugBreak) {
   CHECK_EQ(12, result->Int32Value(context).FromJust());
 
   SetDebugEventListener(env->GetIsolate(), DebugEventDebugBreak);
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
   result = f->Call(context, env->Global(), argc, argv).ToLocalChecked();
 
   // Check that there was only one break event. Matching RegExp should not
@@ -5325,7 +5120,7 @@ TEST(AfterCompileEventWhenEventListenerIsReset) {
   SetDebugEventListener(env->GetIsolate(), nullptr);
 
   SetDebugEventListener(env->GetIsolate(), AfterCompileEventListener);
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
   v8::Script::Compile(context, v8_str(env->GetIsolate(), script))
       .ToLocalChecked()
       ->Run(context)
@@ -5416,7 +5211,7 @@ TEST(BreakEventWhenEventListenerIsReset) {
   SetDebugEventListener(env->GetIsolate(), nullptr);
 
   SetDebugEventListener(env->GetIsolate(), AfterCompileEventListener);
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
   v8::Local<v8::Function> f = v8::Local<v8::Function>::Cast(
       env->Global()
           ->Get(context, v8_str(env->GetIsolate(), "f"))
@@ -5471,6 +5266,27 @@ TEST(ExceptionEventWhenEventListenerIsReset) {
 }
 
 
+// Tests that script is reported as compiled when bound to context.
+TEST(AfterCompileEventOnBindToContext) {
+  DebugLocalContext env;
+  v8::Isolate* isolate = env->GetIsolate();
+  SetDebugEventListener(isolate, AfterCompileEventListener);
+
+  const char* source = "var a=1";
+  v8::ScriptCompiler::Source script_source(
+      v8::String::NewFromUtf8(isolate, source, v8::NewStringType::kNormal)
+          .ToLocalChecked());
+
+  v8::Local<v8::UnboundScript> unbound =
+      v8::ScriptCompiler::CompileUnboundScript(isolate, &script_source)
+          .ToLocalChecked();
+  CHECK_EQ(after_compile_event_count, 0);
+
+  unbound->BindToCurrentContext();
+  CHECK_EQ(after_compile_event_count, 1);
+}
+
+
 static void BreakEventListener(const v8::Debug::EventDetails& details) {
   if (details.GetEvent() == v8::Break) break_point_hit_count++;
 }
@@ -5487,7 +5303,7 @@ TEST(NoDebugBreakInAfterCompileEventListener) {
   SetDebugEventListener(env->GetIsolate(), BreakEventListener);
 
   // Set the debug break flag.
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
 
   // Create a function for testing stepping.
   const char* src = "function f() { eval('var x = 10;'); } ";
@@ -5497,7 +5313,7 @@ TEST(NoDebugBreakInAfterCompileEventListener) {
   CHECK_EQ(1, break_point_hit_count);
 
   // Set the debug break flag again.
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
   f->Call(context, env->Global(), 0, nullptr).ToLocalChecked();
   // There should be one more break event when the script is evaluated in 'f'.
   CHECK_EQ(2, break_point_hit_count);
@@ -5526,7 +5342,7 @@ TEST(DebugBreakFunctionApply) {
   SetDebugEventListener(env->GetIsolate(), DebugEventBreakMax);
 
   // Set the debug break flag before calling the code using function.apply.
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
 
   // Limit the number of debug breaks. This is a regression test for issue 493
   // where this test would enter an infinite loop.
@@ -5684,7 +5500,7 @@ static void DebugEventBreakDeoptimize(
       }
     }
 
-    v8::debug::DebugBreak(CcTest::isolate());
+    v8::debug::SetBreakOnNextFunctionCall(CcTest::isolate());
   }
 }
 
@@ -5715,7 +5531,7 @@ TEST(DeoptimizeDuringDebugBreak) {
       .ToLocalChecked();
 
   // Set debug break and call bar again.
-  v8::debug::DebugBreak(env->GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(env->GetIsolate());
   f->Call(context, v8::Undefined(env->GetIsolate()), 0, nullptr)
       .ToLocalChecked();
 
@@ -5789,7 +5605,7 @@ static void DebugEventBreakWithOptimizedStack(
 
 static void ScheduleBreak(const v8::FunctionCallbackInfo<v8::Value>& args) {
   SetDebugEventListener(args.GetIsolate(), DebugEventBreakWithOptimizedStack);
-  v8::debug::DebugBreak(args.GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(args.GetIsolate());
 }
 
 
@@ -5862,7 +5678,7 @@ static void TestDebugBreakInLoop(const char* loop_head,
       CompileRun(buffer.start());
 
       // Set the debug break to enter the debugger as soon as possible.
-      v8::debug::DebugBreak(CcTest::isolate());
+      v8::debug::SetBreakOnNextFunctionCall(CcTest::isolate());
 
       // Call function with infinite loop.
       CompileRun("f();");
@@ -6000,7 +5816,6 @@ static void DebugBreakInlineListener(
                                       result->Int32Value(context).FromJust()));
   }
   SetDebugEventListener(CcTest::isolate(), nullptr);
-  CcTest::isolate()->TerminateExecution();
 }
 
 
@@ -6129,7 +5944,7 @@ static void DebugBreakStackTraceListener(
 
 
 static void AddDebugBreak(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  v8::debug::DebugBreak(args.GetIsolate());
+  v8::debug::SetBreakOnNextFunctionCall(args.GetIsolate());
 }
 
 
@@ -6195,7 +6010,7 @@ TEST(DebugBreakOffThreadTerminate) {
   TerminationThread terminator(isolate);
   terminator.Start();
   v8::TryCatch try_catch(env->GetIsolate());
-  v8::debug::DebugBreak(isolate);
+  env->GetIsolate()->RequestInterrupt(BreakRightNow, nullptr);
   CompileRun("while (true);");
   CHECK(try_catch.HasTerminated());
 }
@@ -6680,7 +6495,8 @@ TEST(DebugEvaluateNoSideEffect) {
   for (i::Handle<i::JSFunction> fun : all_functions) {
     bool failed = false;
     isolate->debug()->StartSideEffectCheckMode();
-    failed = !isolate->debug()->PerformSideEffectCheck(fun);
+    failed = !isolate->debug()->PerformSideEffectCheck(
+        fun, v8::Utils::OpenHandle(*env->Global()));
     isolate->debug()->StopSideEffectCheckMode();
     if (failed) isolate->clear_pending_exception();
   }

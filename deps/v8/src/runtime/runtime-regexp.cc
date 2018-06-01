@@ -68,8 +68,9 @@ class CompiledReplacement {
       : parts_(1, zone), replacement_substrings_(0, zone), zone_(zone) {}
 
   // Return whether the replacement is simple.
-  bool Compile(Handle<JSRegExp> regexp, Handle<String> replacement,
-               int capture_count, int subject_length);
+  bool Compile(Isolate* isolate, Handle<JSRegExp> regexp,
+               Handle<String> replacement, int capture_count,
+               int subject_length);
 
   // Use Apply only if Compile returned false.
   void Apply(ReplacementStringBuilder* builder, int match_from, int match_to,
@@ -315,7 +316,7 @@ class CompiledReplacement {
   Zone* zone_;
 };
 
-bool CompiledReplacement::Compile(Handle<JSRegExp> regexp,
+bool CompiledReplacement::Compile(Isolate* isolate, Handle<JSRegExp> regexp,
                                   Handle<String> replacement, int capture_count,
                                   int subject_length) {
   {
@@ -347,7 +348,6 @@ bool CompiledReplacement::Compile(Handle<JSRegExp> regexp,
     if (simple) return true;
   }
 
-  Isolate* isolate = replacement->GetIsolate();
   // Find substrings of replacement string and create them as String objects.
   int substring_index = 0;
   for (int i = 0, n = parts_.length(); i < n; i++) {
@@ -630,7 +630,7 @@ V8_WARN_UNUSED_RESULT static Object* StringReplaceGlobalRegExpWithString(
   Zone zone(isolate->allocator(), ZONE_NAME);
   CompiledReplacement compiled_replacement(&zone);
   const bool simple_replace = compiled_replacement.Compile(
-      regexp, replacement, capture_count, subject_length);
+      isolate, regexp, replacement, capture_count, subject_length);
 
   // Shortcut for simple non-regexp global replacements
   if (typeTag == JSRegExp::ATOM && simple_replace) {
@@ -948,7 +948,7 @@ class MatchInfoBackedMatch : public String::Match {
       has_named_captures_ = o->IsFixedArray();
       if (has_named_captures_) {
         DCHECK(FLAG_harmony_regexp_named_captures);
-        capture_name_map_ = handle(FixedArray::cast(o));
+        capture_name_map_ = handle(FixedArray::cast(o), isolate);
       }
     } else {
       has_named_captures_ = false;
@@ -1154,7 +1154,7 @@ static Object* SearchRegExpMultiple(Isolate* isolate, Handle<String> subject,
         last_match[i] = Smi::ToInt(last_match_cache->get(i));
       }
       Handle<FixedArray> cached_fixed_array =
-          Handle<FixedArray>(FixedArray::cast(cached_answer));
+          Handle<FixedArray>(FixedArray::cast(cached_answer), isolate);
       // The cache FixedArray is a COW-array and we need to return a copy.
       Handle<FixedArray> copied_fixed_array =
           isolate->factory()->CopyFixedArrayWithMap(
@@ -1282,8 +1282,8 @@ static Object* SearchRegExpMultiple(Isolate* isolate, Handle<String> subject,
       for (int i = 0; i < capture_registers; i++) {
         last_match_cache->set(i, Smi::FromInt(last_match[i]));
       }
-      Handle<FixedArray> result_fixed_array = builder.array();
-      result_fixed_array->Shrink(builder.length());
+      Handle<FixedArray> result_fixed_array =
+          FixedArray::ShrinkOrEmpty(builder.array(), builder.length());
       // Cache the result and copy the FixedArray into a COW array.
       Handle<FixedArray> copied_fixed_array =
           isolate->factory()->CopyFixedArrayWithMap(
@@ -1491,7 +1491,7 @@ RUNTIME_FUNCTION(Runtime_StringReplaceNonGlobalRegExpWithFunction) {
     Object* maybe_capture_map = regexp->CaptureNameMap();
     if (maybe_capture_map->IsFixedArray()) {
       has_named_captures = true;
-      capture_map = handle(FixedArray::cast(maybe_capture_map));
+      capture_map = handle(FixedArray::cast(maybe_capture_map), isolate);
     }
   }
 
@@ -1561,8 +1561,8 @@ V8_WARN_UNUSED_RESULT MaybeHandle<Object> ToUint32(Isolate* isolate,
 Handle<JSArray> NewJSArrayWithElements(Isolate* isolate,
                                        Handle<FixedArray> elems,
                                        int num_elems) {
-  elems->Shrink(num_elems);
-  return isolate->factory()->NewJSArrayWithElements(elems);
+  return isolate->factory()->NewJSArrayWithElements(
+      FixedArray::ShrinkOrEmpty(elems, num_elems));
 }
 
 }  // namespace
@@ -1756,7 +1756,7 @@ RUNTIME_FUNCTION(Runtime_RegExpReplace) {
   ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
       isolate, global_obj,
       JSReceiver::GetProperty(recv, factory->global_string()));
-  const bool global = global_obj->BooleanValue();
+  const bool global = global_obj->BooleanValue(isolate);
 
   bool unicode = false;
   if (global) {
@@ -1764,7 +1764,7 @@ RUNTIME_FUNCTION(Runtime_RegExpReplace) {
     ASSIGN_RETURN_FAILURE_ON_EXCEPTION(
         isolate, unicode_obj,
         JSReceiver::GetProperty(recv, factory->unicode_string()));
-    unicode = unicode_obj->BooleanValue();
+    unicode = unicode_obj->BooleanValue(isolate);
 
     RETURN_FAILURE_ON_EXCEPTION(isolate,
                                 RegExpUtils::SetLastIndex(isolate, recv, 0));

@@ -49,7 +49,7 @@ namespace internal {
   F(MoveArrayContents, 2, 1)        \
   F(NewArray, -1 /* >= 3 */, 1)     \
   F(NormalizeElements, 1, 1)        \
-  F(RemoveArrayHoles, 2, 1)         \
+  F(PrepareElementsForSort, 2, 1)   \
   F(TransitionElementsKind, 2, 1)   \
   F(TrySliceSimpleNonFastElements, 3, 1)
 
@@ -68,6 +68,7 @@ namespace internal {
   F(BigIntBinaryOp, 3, 1)            \
   F(BigIntCompareToBigInt, 3, 1)     \
   F(BigIntCompareToNumber, 3, 1)     \
+  F(BigIntCompareToString, 3, 1)     \
   F(BigIntEqualToBigInt, 2, 1)       \
   F(BigIntEqualToNumber, 2, 1)       \
   F(BigIntEqualToString, 2, 1)       \
@@ -131,7 +132,6 @@ namespace internal {
   F(ClearStepping, 0, 1)                        \
   F(CollectGarbage, 1, 1)                       \
   F(DebugApplyInstrumentation, 1, 1)            \
-  F(DebugAsyncFunctionPromiseCreated, 1, 1)     \
   F(DebugBreakAtEntry, 1, 1)                    \
   F(DebugCollectCoverage, 0, 1)                 \
   F(DebugConstructedBy, 2, 1)                   \
@@ -143,12 +143,14 @@ namespace internal {
   F(DebugGetPropertyDetails, 2, 1)              \
   F(DebugGetPrototype, 1, 1)                    \
   F(DebugIsActive, 0, 1)                        \
-  F(DebugOnFunctionCall, 1, 1)                  \
+  F(DebugOnFunctionCall, 2, 1)                  \
   F(DebugPopPromise, 0, 1)                      \
   F(DebugPrepareStepInSuspendedGenerator, 0, 1) \
   F(DebugPropertyAttributesFromDetails, 1, 1)   \
   F(DebugPropertyKindFromDetails, 1, 1)         \
   F(DebugPushPromise, 1, 1)                     \
+  F(DebugAsyncFunctionSuspended, 1, 1)          \
+  F(DebugAsyncFunctionFinished, 2, 1)           \
   F(DebugReferencedBy, 3, 1)                    \
   F(DebugSetScriptSource, 2, 1)                 \
   F(DebugToggleBlockCoverage, 1, 1)             \
@@ -254,7 +256,6 @@ namespace internal {
   F(GetDefaultICULocale, 0, 1)               \
   F(InternalCompare, 3, 1)                   \
   F(InternalDateFormat, 2, 1)                \
-  F(InternalDateFormatToParts, 2, 1)         \
   F(InternalNumberFormat, 2, 1)              \
   F(IsInitializedIntlObject, 1, 1)           \
   F(IsInitializedIntlObjectOfType, 2, 1)     \
@@ -281,7 +282,6 @@ namespace internal {
   F(ExportFromRuntime, 1, 1)                                         \
   F(GetAndResetRuntimeCallStats, -1 /* <= 2 */, 1)                   \
   F(IncrementUseCounter, 1, 1)                                       \
-  F(IncrementUseCounterConstructorReturnNonUndefinedPrimitive, 0, 1) \
   F(InstallToContext, 1, 1)                                          \
   F(Interrupt, 0, 1)                                                 \
   F(IS_VAR, 1, 1)                                                    \
@@ -346,7 +346,6 @@ namespace internal {
   F(IsSmi, 1, 1)                      \
   F(IsValidSmi, 1, 1)                 \
   F(MaxSmi, 0, 1)                     \
-  F(NumberToSmi, 1, 1)                \
   F(NumberToStringSkipCache, 1, 1)    \
   F(SmiLexicographicCompare, 2, 1)    \
   F(StringParseFloat, 1, 1)           \
@@ -396,6 +395,7 @@ namespace internal {
   F(OptimizeObjectForAddingMultipleProperties, 2, 1)            \
   F(SameValue, 2, 1)                                            \
   F(SameValueZero, 2, 1)                                        \
+  F(SetDataProperties, 2, 1)                                    \
   F(SetProperty, 4, 1)                                          \
   F(ShrinkPropertyDictionary, 1, 1)                             \
   F(ToFastProperties, 1, 1)                                     \
@@ -427,6 +427,7 @@ namespace internal {
   F(PromiseHookAfter, 1, 1)            \
   F(PromiseHookBefore, 1, 1)           \
   F(PromiseHookInit, 2, 1)             \
+  F(AwaitPromisesInit, 3, 1)           \
   F(PromiseMarkAsHandled, 1, 1)        \
   F(PromiseRejectEventFromStack, 2, 1) \
   F(PromiseResult, 1, 1)               \
@@ -463,18 +464,19 @@ namespace internal {
   F(LoadLookupSlot, 1, 1)                 \
   F(LoadLookupSlotInsideTypeof, 1, 1)     \
   F(NewArgumentsElements, 3, 1)           \
+                                          \
   F(NewClosure, 2, 1)                     \
   F(NewClosure_Tenured, 2, 1)             \
-  F(NewFunctionContext, 2, 1)             \
+  F(NewFunctionContext, 1, 1)             \
   F(NewRestParameter, 1, 1)               \
-  F(NewScriptContext, 2, 1)               \
+  F(NewScriptContext, 1, 1)               \
   F(NewSloppyArguments, 3, 1)             \
   F(NewSloppyArguments_Generic, 1, 1)     \
   F(NewStrictArguments, 1, 1)             \
-  F(PushBlockContext, 2, 1)               \
-  F(PushCatchContext, 4, 1)               \
-  F(PushModuleContext, 3, 1)              \
-  F(PushWithContext, 3, 1)                \
+  F(PushBlockContext, 1, 1)               \
+  F(PushCatchContext, 2, 1)               \
+  F(PushModuleContext, 2, 1)              \
+  F(PushWithContext, 2, 1)                \
   F(StoreLookupSlot_Sloppy, 2, 1)         \
   F(StoreLookupSlot_SloppyHoisting, 2, 1) \
   F(StoreLookupSlot_Strict, 2, 1)         \
@@ -519,6 +521,7 @@ namespace internal {
   F(ClearFunctionFeedback, 1, 1)              \
   F(CompleteInobjectSlackTracking, 1, 1)      \
   F(ConstructConsString, 2, 1)                \
+  F(ConstructSlicedString, 2, 1)              \
   F(ConstructDouble, 2, 1)                    \
   F(DebugPrint, 1, 1)                         \
   F(DebugTrace, 0, 1)                         \
@@ -592,7 +595,6 @@ namespace internal {
   F(UnblockConcurrentRecompilation, 0, 1)     \
   F(ValidateWasmInstancesChain, 2, 1)         \
   F(ValidateWasmModuleState, 1, 1)            \
-  F(ValidateWasmOrphanedInstance, 1, 1)       \
   F(WasmNumInterpretedCalls, 1, 1)            \
   F(WasmTraceMemory, 1, 1)
 
@@ -606,6 +608,28 @@ namespace internal {
   F(TypedArraySet, 2, 1)                 \
   F(TypedArraySortFast, 1, 1)
 
+#define FOR_EACH_INTRINSIC_DATAVIEW(F) \
+  F(DataViewGetInt8, 1, 1)             \
+  F(DataViewGetUint8, 1, 1)            \
+  F(DataViewGetInt16, 2, 1)            \
+  F(DataViewGetUint16, 2, 1)           \
+  F(DataViewGetInt32, 2, 1)            \
+  F(DataViewGetUint32, 2, 1)           \
+  F(DataViewGetFloat32, 2, 1)          \
+  F(DataViewGetFloat64, 2, 1)          \
+  F(DataViewGetBigInt64, 2, 1)         \
+  F(DataViewGetBigUint64, 2, 1)        \
+  F(DataViewSetInt8, 2, 1)             \
+  F(DataViewSetUint8, 2, 1)            \
+  F(DataViewSetInt16, 3, 1)            \
+  F(DataViewSetUint16, 3, 1)           \
+  F(DataViewSetInt32, 3, 1)            \
+  F(DataViewSetUint32, 3, 1)           \
+  F(DataViewSetFloat32, 3, 1)          \
+  F(DataViewSetFloat64, 3, 1)          \
+  F(DataViewSetBigInt64, 3, 1)         \
+  F(DataViewSetBigUint64, 3, 1)
+
 #define FOR_EACH_INTRINSIC_WASM(F)   \
   F(ThrowWasmError, 1, 1)            \
   F(ThrowWasmStackOverflow, 0, 1)    \
@@ -617,10 +641,10 @@ namespace internal {
   F(WasmStackGuard, 0, 1)            \
   F(WasmThrow, 0, 1)                 \
   F(WasmThrowCreate, 2, 1)           \
-  F(WasmThrowTypeError, 0, 1)
+  F(WasmThrowTypeError, 0, 1)        \
+  F(WasmCompileLazy, 1, 1)
 
 #define FOR_EACH_INTRINSIC_RETURN_PAIR(F) \
-  F(WasmCompileLazy, 1, 2)                \
   F(DebugBreakOnBytecode, 1, 2)           \
   F(LoadLookupSlotForCall, 1, 2)
 
@@ -675,6 +699,7 @@ namespace internal {
   FOR_EACH_INTRINSIC_SYMBOL(F)              \
   FOR_EACH_INTRINSIC_TEST(F)                \
   FOR_EACH_INTRINSIC_TYPEDARRAY(F)          \
+  FOR_EACH_INTRINSIC_DATAVIEW(F)            \
   FOR_EACH_INTRINSIC_WASM(F)
 
 // FOR_EACH_INTRINSIC defines the list of all intrinsics, coming in 2 flavors,
